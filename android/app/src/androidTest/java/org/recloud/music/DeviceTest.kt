@@ -219,6 +219,23 @@ class DeviceTest {
                     }
                 ) delay(100)
             }
+            for (mode in listOf(Player.REPEAT_MODE_ALL, Player.REPEAT_MODE_ONE, Player.REPEAT_MODE_OFF)) {
+                withContext(Dispatchers.Main) {
+                    player.shuffleModeEnabled = false
+                    player.repeatMode = mode
+                    player.seekTo(1, 14500)
+                    player.play()
+                }
+                withTimeout(8000) {
+                    while (!withContext(Dispatchers.Main) {
+                        when (mode) {
+                            Player.REPEAT_MODE_OFF -> player.playbackState == Player.STATE_ENDED
+                            else -> player.isPlaying && player.currentPosition in 0..3000 &&
+                                player.currentMediaItemIndex == (if (mode == Player.REPEAT_MODE_ALL) 0 else 1)
+                        }
+                    }) delay(100)
+                }
+            }
             withContext(Dispatchers.Main) {
                 player.removeMediaItem(1)
                 assertEquals(1, player.mediaItemCount)

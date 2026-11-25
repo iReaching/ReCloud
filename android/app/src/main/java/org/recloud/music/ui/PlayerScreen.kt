@@ -64,6 +64,7 @@ fun MiniPlayer(vm: MusicModel, expand: () -> Unit) {
 @Composable
 fun PlayerScreen(vm: MusicModel, opts: Map<String, String>) {
     vm.revision
+    var videoRepeatMode by rememberSaveable { mutableIntStateOf(Player.REPEAT_MODE_OFF) }
     val video = vm.video
     if (video != null) {
         val open = openLink()
@@ -75,7 +76,7 @@ fun PlayerScreen(vm: MusicModel, opts: Map<String, String>) {
         Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
             Heading("Now playing")
             key(vm.showVideo) {
-                YouTubePlayer(vm.videoQueue, position, { position = it }) {
+                YouTubePlayer(vm.videoQueue, position, { position = it }, videoRepeatMode, { videoRepeatMode = it }) {
                     Heading(current.title)
                     Text(current.artist)
                 }
@@ -207,14 +208,7 @@ fun PlayerScreen(vm: MusicModel, opts: Map<String, String>) {
                         click = vm::toggle,
                     )
                     Transport(R.drawable.next, "Next") { p.seekToNextMediaItem() }
-                    Transport(
-                        if (p.repeatMode == Player.REPEAT_MODE_ONE) R.drawable.repeatone
-                        else R.drawable.repeat,
-                        "Repeat",
-                        p.repeatMode != Player.REPEAT_MODE_OFF,
-                    ) {
-                        p.repeatMode = (p.repeatMode + 1) % 3
-                    }
+                    RepeatButton(p.repeatMode) { p.repeatMode = it }
                 }
                 TextButton({ queue = true }) {
                     Icon(

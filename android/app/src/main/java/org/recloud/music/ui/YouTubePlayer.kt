@@ -6,6 +6,7 @@ import android.webkit.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -14,6 +15,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.media3.common.Player
+import kotlin.random.Random
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.recloud.music.R
@@ -28,6 +31,8 @@ internal fun YouTubePlayer(
     queue: List<VideoEntry>,
     position: Int,
     onPosition: (Int) -> Unit,
+    repeatMode: Int,
+    onRepeatModeChange: (Int) -> Unit,
     details: @Composable () -> Unit,
 ) {
     if (queue.isEmpty()) return
@@ -36,16 +41,19 @@ internal fun YouTubePlayer(
             minActiveState = Lifecycle.State.CREATED
         )
     var attempt by remember { mutableIntStateOf(0) }
+    var shuffleSeed by rememberSaveable { mutableStateOf<Int?>(null) }
+    val order = remember(queue, shuffleSeed) {
+        val indices = queue.indices.toList()
+        shuffleSeed?.let { indices.shuffled(Random(it)) } ?: indices
+    }
+    val playOrderIndex = remember(order, position) { order.indexOf(position) }
     val open = openLink()
     key(attempt, lifecycle.isAtLeast(Lifecycle.State.RESUMED)) {
         var web by remember { mutableStateOf<WebView?>(null) }
         var transport by remember { mutableStateOf<TransportState?>(null) }
         var error by remember { mutableStateOf("") }
         var timedOut by remember { mutableStateOf(false) }
-        var shuffleOn by remember { mutableStateOf(false) }
         var showQueue by remember { mutableStateOf(false) }
-        var playbackOrder by remember { mutableStateOf(emptyList<String>()) }
-        var playOrderIndex by remember { mutableStateOf(-1) }
         var drag by remember(position) { mutableStateOf<Float?>(null) }
         val updateIndex by rememberUpdatedState(onPosition)
         if (lifecycle.isAtLeast(Lifecycle.State.RESUMED)) {
@@ -124,7 +132,7 @@ internal fun YouTubePlayer(
                                 }
                             loadDataWithBaseURL(
                                 "https://${context.packageName}/",
-                                videoQueuePage(queue, position),
+                                videoQueuePage(queue, position, order, repeatMode),
                                 "text/html",
                                 "UTF-8",
                                 null,
@@ -140,18 +148,14 @@ internal fun YouTubePlayer(
                 )
             }
         }
-        LaunchedEffect(web, showQueue) {
+        LaunchedEffect(web) {
             val view = web ?: return@LaunchedEffect
             while (true) {
-                view.evaluateJavascript("window.transportSnapshot ? transportSnapshot($showQueue) : null") {
+                view.evaluateJavascript("window.transportSnapshot ? transportSnapshot() : null") {
                     value ->
                     if (web !== view || value == null || !value.startsWith("["))
                         return@evaluateJavascript
                     val data = JSONArray(value)
-                    playOrderIndex = data.optInt(3, -1)
-                    data.optJSONArray(4)?.let { ids ->
-                        playbackOrder = List(ids.length()) { index -> ids.optString(index) }
-                    }
                     transport = TransportState(data.optInt(0), data.optLong(1), data.optLong(2))
                 }
                 delay(500)
@@ -176,6 +180,13 @@ internal fun YouTubePlayer(
         fun command(script: String) {
             web?.evaluateJavascript(script, null)
         }
+        LaunchedEffect(web, ready, order) {
+            if (ready) command("replaceOrder([${order.joinToString(",")}])")
+        }
+        LaunchedEffect(web, ready, repeatMode) {
+            if (ready) command("repeatMode = $repeatMode")
+        }
+        val wrap = repeatMode == Player.REPEAT_MODE_ALL && queue.size > 1
         Slider(
             value = drag ?: elapsed.toFloat(),
             onValueChange = { drag = it },
@@ -197,19 +208,18 @@ internal fun YouTubePlayer(
         ) {
             Transport(
                 R.drawable.shuffle,
-                if (shuffleOn) "Turn shuffle off" else "Turn shuffle on",
-                shuffleOn,
+                if (shuffleSeed != null) "Turn shuffle off" else "Turn shuffle on",
+                shuffleSeed != null,
                 ready && queue.size > 1 && playOrderIndex >= 0,
             ) {
-                shuffleOn = !shuffleOn
-                command("player.setShuffle($shuffleOn)")
+                shuffleSeed = if (shuffleSeed == null) Random.nextInt() else null
             }
             Transport(
                 icon = R.drawable.prev,
                 label = "Previous",
-                enabled = ready && playOrderIndex > 0,
+                enabled = ready && (playOrderIndex > 0 || wrap),
             ) {
-                command("player.previousVideo()")
+                command("skip(-1)")
             }
             Transport(
                 if (playing) R.drawable.pause else R.drawable.play,
@@ -219,21 +229,13 @@ internal fun YouTubePlayer(
             ) {
                 command(if (playing) "player.pauseVideo()" else "player.playVideo()")
             }
-            Transport(R.drawable.next, "Next", enabled = ready && playOrderIndex in 0 until queue.lastIndex) {
-                command("player.nextVideo()")
+            Transport(R.drawable.next, "Next", enabled = ready && (playOrderIndex in 0 until queue.lastIndex || wrap)) {
+                command("skip(1)")
             }
-            Transport (
-                R.drawable.repeat,
-                if (transport?.state == 5) "Turn loop off" else "Turn loop on",
-                transport?.state == 5,
-                ready && queue.size > 1 && playOrderIndex >= 0,
-            ) {
-                command("player.setLoop(${transport?.state != 5})")
-            }
+            RepeatButton(repeatMode, enabled = ready, change = onRepeatModeChange)
         }
         TextButton(
             onClick = {
-                playbackOrder = emptyList()
                 showQueue = !showQueue
             },
             enabled = ready,
@@ -244,37 +246,34 @@ internal fun YouTubePlayer(
         if (showQueue) {
             Text("Up next", style = MaterialTheme.typography.titleMedium)
 
-            val orderedSongs = remember(queue, playbackOrder) {
-                val songsById = queue.groupBy { it.id }
-                    .mapValues { (_, songs) -> ArrayDeque(songs) }
-
-                playbackOrder.map { id -> songsById[id]?.removeFirstOrNull() }
+            val upcomingCount = when (repeatMode) {
+                Player.REPEAT_MODE_ONE -> 1
+                Player.REPEAT_MODE_ALL -> order.size
+                else -> order.lastIndex - playOrderIndex
             }
-
-            when {
-                queue.size == 1 -> Text("No more songs in this queue.")
-                orderedSongs.isEmpty() || playOrderIndex < 0 -> Text("Loading queue…")
-                playOrderIndex >= orderedSongs.lastIndex -> Text("No more songs in this queue.")
-                else -> {
-                    val firstUpcoming = playOrderIndex + 1
-
-                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 280.dp)) {
-                        items(orderedSongs.size - firstUpcoming) { offset ->
-                            val song = orderedSongs[firstUpcoming + offset]
-                            ListItem(
-                                headlineContent = { Text(song?.title ?: "Unknown song") },
-                                supportingContent = { Text(song?.artist.orEmpty()) },
-                                leadingContent = { Text("${offset + 1}") },
-                            )
-                        }
-                    }
+            if (upcomingCount == 0) Text("No more songs in this queue.")
+            else LazyColumn(Modifier.fillMaxWidth().heightIn(max = 280.dp)) {
+                items(upcomingCount) { offset ->
+                    val next = if (repeatMode == Player.REPEAT_MODE_ONE) position
+                        else order[(playOrderIndex + 1 + offset) % order.size]
+                    val song = queue[next]
+                    ListItem(
+                        headlineContent = { Text(song.title) },
+                        supportingContent = { Text(song.artist) },
+                        leadingContent = { Text("${offset + 1}") },
+                    )
                 }
             }
         }
     }
 }
 
-internal fun videoQueuePage(queue: List<VideoEntry>, position: Int = 0): String {
+internal fun videoQueuePage(
+    queue: List<VideoEntry>,
+    position: Int = 0,
+    order: List<Int> = queue.indices.toList(),
+    repeatMode: Int = Player.REPEAT_MODE_OFF,
+): String {
     val ids =
         queue.joinToString(",") {
             require(it.id.matches(Regex("[A-Za-z0-9_-]{11}")))
@@ -288,6 +287,33 @@ internal fun videoQueuePage(queue: List<VideoEntry>, position: Int = 0): String 
         <style>html,body{margin:0;background:#000;overflow:hidden}#player{display:block;border:0}</style>
         </head><body><div id="player"></div><script>
         var player, ready = false;
+        const videos = [$ids];
+        let order = [${order.joinToString(",")}];
+        let cursor = order.indexOf($index);
+        let repeatMode = $repeatMode;
+        let hasPlayed = false;
+        function replaceOrder(newOrder) {
+          const current = order[cursor];
+          order = newOrder;
+          cursor = order.indexOf(current);
+        }
+        function playAt(next) {
+          const current = order[cursor];
+          hasPlayed = false;
+          cursor = next;
+          document.title = 'queue:' + order[cursor];
+          if (order[cursor] === current) {
+            player.seekTo(0, true);
+            player.playVideo();
+          } else {
+            player.loadVideoById(videos[order[cursor]]);
+          }
+        }
+        function skip(delta) {
+          let next = cursor + delta;
+          if (repeatMode === ${Player.REPEAT_MODE_ALL}) next = (next + order.length) % order.length;
+          if (next >= 0 && next < order.length) playAt(next);
+        }
         function sizePlayer() {
           const frame = document.getElementById('player');
           if (frame && innerHeight > 0) {
@@ -297,16 +323,10 @@ internal fun videoQueuePage(queue: List<VideoEntry>, position: Int = 0): String 
         }
         window.addEventListener('resize', sizePlayer);
         if (window.visualViewport) visualViewport.addEventListener('resize', sizePlayer);
-        function transportSnapshot(includeQueue) {
-        if (!ready) return null;
-
-        return [
-            player.getPlayerState(),
-            Math.round(player.getCurrentTime() * 1000) || 0,
-            Math.round(player.getDuration() * 1000) || 0,
-            player.getPlaylistIndex(),
-            includeQueue ? (player.getPlaylist() || []) : null
-        ];
+        function transportSnapshot() {
+          if (!ready) return null;
+          return [player.getPlayerState(), Math.round(player.getCurrentTime()*1000) || 0,
+                  Math.round(player.getDuration()*1000) || 0];
         }
         function onYouTubeIframeAPIReady() {
           player = new YT.Player('player', {
@@ -315,27 +335,20 @@ internal fun videoQueuePage(queue: List<VideoEntry>, position: Int = 0): String 
             events: {
               onReady: function(event) {
                 sizePlayer();
-                if (${queue.size} > 1) event.target.cuePlaylist([$ids], $index);
                 ready = true;
               },
-                onStateChange: function(event) {
-                const index = event.target.getPlaylistIndex();
-                if (index < 0) return;
-
-                const order = event.target.getPlaylist?.();
-                const original = [$ids];
-                let originalIndex = index;
-
-                if (order && order[index]) {
-                    const id = order[index];
-                    // Count occurrences because a playlist can contain the same video twice.
-                    let occurrence = order.slice(0, index + 1).filter(item => item === id).length;
-                    originalIndex = original.findIndex(item => item === id && --occurrence === 0);
+              onStateChange: function(event) {
+                if (event.data === YT.PlayerState.PLAYING) hasPlayed = true;
+                if (event.data === YT.PlayerState.ENDED && hasPlayed) {
+                  hasPlayed = false;
+                  if (repeatMode === ${Player.REPEAT_MODE_ONE}) playAt(cursor);
+                  else skip(1);
                 }
-
-                if (originalIndex >= 0) document.title = 'queue:' + originalIndex;
-                },
-              onError: function(event) { document.title = 'error:' + event.data; }
+              },
+              onError: function(event) {
+                hasPlayed = false;
+                document.title = 'error:' + event.data;
+              }
             }
           });
           sizePlayer();

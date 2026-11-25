@@ -17,8 +17,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.media3.common.Player
 import androidx.room.withTransaction
 import coil.compose.AsyncImage
+import org.recloud.music.R
 import org.recloud.music.data.*
 import org.recloud.music.network.Release
 import org.recloud.music.network.archiveUrl
@@ -79,6 +81,24 @@ fun Transport(icon: Int, label: String, selected: Boolean = false, enabled: Bool
             tint = if (selected && enabled) MaterialTheme.colorScheme.primary else LocalContentColor.current,
         )
     }
+}
+
+@Composable
+internal fun RepeatButton(mode: Int, enabled: Boolean = true, change: (Int) -> Unit) {
+    val next = when (mode) {
+        Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+        Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+        else -> Player.REPEAT_MODE_OFF
+    }
+    val label = when (mode) {
+        Player.REPEAT_MODE_ALL -> "Repeating queue. Switch to repeat song"
+        Player.REPEAT_MODE_ONE -> "Repeating song. Turn repeat off"
+        else -> "Repeat off. Switch to repeat queue"
+    }
+    Transport(
+        if (mode == Player.REPEAT_MODE_ONE) R.drawable.repeatone else R.drawable.repeat,
+        label, selected = mode != Player.REPEAT_MODE_OFF, enabled = enabled,
+    ) { change(next) }
 }
 
 @Composable
