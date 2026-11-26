@@ -71,21 +71,39 @@ fun PlayerScreen(vm: MusicModel, opts: Map<String, String>) {
         val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
             if (uris.isNotEmpty()) vm.playAudioFiles(uris)
         }
-        var position by rememberSaveable(vm.showVideo) { mutableIntStateOf(0) }
-        val current = vm.videoQueue.getOrNull(position) ?: video
         Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
             Heading("Now playing")
-            key(vm.showVideo) {
-                YouTubePlayer(vm.videoQueue, position, { position = it }, videoRepeatMode, { videoRepeatMode = it }) {
-                    Heading(current.title)
-                    Text(current.artist)
+            val session = vm.showVideo
+            key(session) {
+                YouTubePlayer(
+                    queue = vm.videoQueue,
+                    position = vm.videoPosition,
+                    onPosition = { vm.updateVideoPosition(session, it) },
+                    onPlaying = { key, replay -> vm.videoPlaying(session, key, replay) },
+                    onStopped = { vm.videoStopped(session) },
+                    checkpoint = { vm.checkpointVideo(session) },
+                    order = vm.videoOrder,
+                    shuffled = vm.videoShuffled,
+                    toggleShuffle = vm::toggleVideoShuffle,
+                    move = vm::moveVideo,
+                    remove = vm::removeVideo,
+                    repeatMode = videoRepeatMode,
+                    onRepeatModeChange = { videoRepeatMode = it },
+                ) {
+                    Heading(video.title)
+                    Text(video.artist)
                 }
             }
             OutlinedButton({ picker.launch(arrayOf("audio/*")) }) { Text("Play audio files…") }
-            TextButton({ open("https://www.youtube.com/watch?v=" + current.id) }) {
+            Text("YouTube videos pause when you leave this player. Audio files and Internet Archive tracks can keep playing with the screen locked.",
+                style = MaterialTheme.typography.bodySmall)
+            TextButton({ open("https://music.youtube.com/watch?v=" + video.id) }) {
+                Text("Open in YouTube Music")
+            }
+            TextButton({ open("https://www.youtube.com/watch?v=" + video.id) }) {
                 Text("Open in YouTube")
             }
-            TextButton({ vm.video = null }) { Text("Return to audio queue") }
+            TextButton(vm::closeVideo) { Text("Return to audio queue") }
         }
         return
     }
@@ -94,31 +112,19 @@ fun PlayerScreen(vm: MusicModel, opts: Map<String, String>) {
     var queue by rememberSaveable { mutableStateOf(false) }
     BackHandler(queue) { queue = false }
     if (queue && p != null) {
-        LazyColumn(contentPadding = PaddingValues(16.dp)) {
-            item {
-                TextButton({ queue = false }) { Text("‹ Now playing") }
-                Heading("Queue")
-            }
-            items(p.mediaItemCount) { i ->
-                val item = p.getMediaItemAt(i)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.weight(1f)) {
-                        Entry(
-                            item.mediaMetadata.title.toString(),
-                            if (i == p.currentMediaItemIndex) "Now playing"
-                            else item.mediaMetadata.artist.toString(),
-                        ) {
-                            p.seekTo(i, 0)
-                            p.prepare()
-                            p.play()
-                        }
-                    }
-                    TextButton({ if (i > 0) p.moveMediaItem(i, i - 1) }, enabled = i > 0) {
-                        Text("Up")
-                    }
-                    TextButton({ p.removeMediaItem(i) }) { Text("Remove") }
-                }
-            }
+        Column(Modifier.fillMaxSize().padding(16.dp)) {
+            TextButton({ queue = false }) { Text("‹ Now playing") }
+            Heading("Queue")
+            val rows = p.queueRows()
+            if (rows.isEmpty()) Text("The audio queue is empty.")
+            EditableQueue(
+                rows = rows,
+                current = p.currentMediaItemIndex,
+                canMove = !p.shuffleModeEnabled,
+                jump = { p.seekTo(it, 0); p.prepare(); p.play() },
+                move = p::moveMediaItem,
+                remove = p::removeMediaItem,
+            )
         }
         return
     }

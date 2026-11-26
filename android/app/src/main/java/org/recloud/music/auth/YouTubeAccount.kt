@@ -1,11 +1,17 @@
 package org.recloud.music.auth
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import androidx.activity.result.IntentSenderRequest
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.Identity
+import com.google.android.gms.auth.api.identity.ClearTokenRequest
 import com.google.android.gms.common.api.Scope
+import com.google.android.gms.tasks.Task
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.*
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -41,9 +47,9 @@ internal class AccountPlaylistReader(private val fetch: suspend (String) -> Play
         next = page.next
     }
 
-    suspend fun queue(start: Int, shuffle: Boolean): List<VideoEntry> {
+    suspend fun loadAll(): List<VideoEntry> {
         while (next != null) loadNext()
-        return if (shuffle) entries.shuffled() else entries.drop(start)
+        return entries.toList()
     }
 }
 
@@ -52,6 +58,27 @@ interface AccountProvider {
 }
 
 class YouTubeAccount(private val client: OkHttpClient) : AccountProvider {
+    private fun request(account: android.accounts.Account) = AuthorizationRequest.builder()
+        .setAccount(account)
+        .setRequestedScopes(listOf(Scope("https://www.googleapis.com/auth/youtube.readonly")))
+        .build()
+
+    internal suspend fun restore(context: Context, name: String): String {
+        val client = Identity.getAuthorizationClient(context)
+        val result = try {
+            client.authorize(request(android.accounts.Account(name, "com.google"))).awaitResult()
+        } catch (error: com.google.android.gms.common.api.ApiException) {
+            throw AccountAccessError(authorizationFailure(error))
+        }
+        if (result.hasResolution()) throw ConsentRequired()
+        return result.accessToken ?: throw ConsentRequired()
+    }
+
+    internal suspend fun invalidate(context: Context, token: String) {
+        Identity.getAuthorizationClient(context)
+            .clearToken(ClearTokenRequest.builder().setToken(token).build()).awaitResult()
+    }
+
     fun authorize(
         activity: Activity,
         account: android.accounts.Account,
@@ -59,15 +86,8 @@ class YouTubeAccount(private val client: OkHttpClient) : AccountProvider {
         ready: (String) -> Unit,
         fail: (String) -> Unit,
     ) {
-        val request =
-            AuthorizationRequest.builder()
-                .setAccount(account)
-                .setRequestedScopes(
-                    listOf(Scope("https://www.googleapis.com/auth/youtube.readonly"))
-                )
-                .build()
         Identity.getAuthorizationClient(activity)
-            .authorize(request)
+            .authorize(request(account))
             .addOnSuccessListener {
                 val pending = it.pendingIntent
                 if (it.hasResolution() && pending != null)
@@ -132,7 +152,7 @@ class YouTubeAccount(private val client: OkHttpClient) : AccountProvider {
         return result
     }
 
-    internal fun reader(id: String, token: String) = AccountPlaylistReader { cursor ->
+    internal suspend fun playlistPage(id: String, cursor: String, token: String): PlaylistPage {
         val url = "https://www.googleapis.com/youtube/v3/playlistItems".toHttpUrl().newBuilder()
             .addQueryParameter("part", "snippet")
             .addQueryParameter("playlistId", id)
@@ -147,9 +167,18 @@ class YouTubeAccount(private val client: OkHttpClient) : AccountProvider {
             val itemId = item.jsonObject.field("id").takeIf { it.isNotBlank() } ?: return@mapNotNull null
             itemId to video
         }
-        PlaylistPage(items, root.field("nextPageToken").ifBlank { null })
+        return PlaylistPage(items, root.field("nextPageToken").ifBlank { null })
     }
 }
+
+private suspend fun <T> Task<T>.awaitResult(): T = suspendCancellableCoroutine { continuation ->
+    addOnSuccessListener { continuation.resume(it) }
+    addOnFailureListener { continuation.resumeWithException(it) }
+    addOnCanceledListener { continuation.cancel() }
+}
+
+internal open class AccountAccessError(message: String) : Exception(message)
+internal class ConsentRequired : AccountAccessError("Reconnect your Google account in Settings to grant playlist access.")
 
 private fun authorizationFailure(error: Throwable): String {
     val status = (error as? com.google.android.gms.common.api.ApiException)?.status
@@ -178,6 +207,7 @@ internal fun internalAuthorizationError(detail: String): String {
     }
 }
 internal fun playlistFailureMessage(error: Exception): String {
+    if (error is AccountAccessError) return error.message.orEmpty()
     val failure = error as? org.recloud.music.network.ServiceFailure
         ?: return if (error is java.io.IOException) "Could not reach YouTube. Check the connection and retry playlists."
         else "YouTube returned an unreadable playlist response."

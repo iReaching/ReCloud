@@ -95,6 +95,10 @@ data class Listening(
 
 @Entity data class Download(@PrimaryKey val song: String, val bytes: Long)
 
+@Entity data class HeldDownload(@PrimaryKey val song: String)
+
+@Entity data class PlaylistCover(@PrimaryKey val playlist: String, val jpeg: ByteArray)
+
 @Serializable
 data class LibraryPacket(
     val version: Int = 1,

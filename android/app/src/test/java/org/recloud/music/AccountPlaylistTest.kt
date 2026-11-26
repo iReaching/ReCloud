@@ -56,33 +56,31 @@ class AccountPlaylistTest {
                         .build()
                 }
                 .build()
-        val reader = YouTubeAccount(http).reader("owned", "fixture")
+        val account = YouTubeAccount(http)
+        val reader = AccountPlaylistReader { account.playlistPage("owned", it, "fixture") }
         reader.loadNext()
         assertEquals(50, reader.entries.size)
-        assertTrue(runCatching { reader.queue(49, false) }.exceptionOrNull() is ServiceFailure)
+        assertTrue(runCatching { reader.loadAll() }.exceptionOrNull() is ServiceFailure)
         assertEquals(50, reader.entries.size)
-        assertEquals(
-            listOf("Track 50", "Track 51", "Track 52"),
-            reader.queue(49, false).map { it.title },
-        )
-        assertEquals(listOf("Track 51", "Track 52"), reader.queue(50, false).map { it.title })
-        val all = reader.queue(0, false)
-        assertEquals(52, all.size)
+        val all = reader.loadAll()
+        assertEquals((1..52).map { "Track $it" }, all.map { it.title })
         assertEquals(all[0].id, all[50].id)
         assertEquals("Artist", all[0].artist)
-        assertEquals(all.map { it.title }.sorted(), reader.queue(0, true).map { it.title }.sorted())
-        assertTrue(videoQueuePage(all).contains(all.joinToString(",") { "'${it.id}'" }))
+        assertEquals(all, reader.loadAll())
+        val page = videoQueuePage(all.indices.associateWith { all[it] }, position = 50)
+        assertTrue(page.contains("50:'${all[50].id}'"))
+        assertTrue(page.contains("<title>queue:50</title>"))
         assertEquals(listOf(null, "next", "next"), cursors)
     }
 
     @Test
     fun emptyPagesAndRepeatedTokensTerminate() = runBlocking {
         val empty = AccountPlaylistReader { PlaylistPage(emptyList(), null) }
-        assertTrue(empty.queue(0, false).isEmpty())
+        assertTrue(empty.loadAll().isEmpty())
         assertNull(empty.next)
         val repeated = AccountPlaylistReader { PlaylistPage(emptyList(), "same") }
         assertTrue(
-            runCatching { repeated.queue(0, false) }.exceptionOrNull() is IllegalStateException
+            runCatching { repeated.loadAll() }.exceptionOrNull() is IllegalStateException
         )
     }
 }

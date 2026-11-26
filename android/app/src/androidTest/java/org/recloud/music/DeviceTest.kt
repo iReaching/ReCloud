@@ -2,10 +2,12 @@ package org.recloud.music
 
 import android.content.ComponentName
 import android.net.Uri
+import androidx.lifecycle.ViewModelProvider
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.room.Room
+import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
@@ -16,18 +18,94 @@ import kotlinx.coroutines.flow.first
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.recloud.music.auth.ApiKey
+import org.recloud.music.auth.EncryptedPreference
 import org.recloud.music.data.*
 import org.recloud.music.database.Library
 import org.recloud.music.playback.MusicService
 import org.recloud.music.playback.media
 import org.recloud.music.repository.Collection
 import org.recloud.music.settings.Options
+import org.recloud.music.viewmodel.MusicModel
+import org.recloud.music.ui.queueRows
 
 @RunWith(AndroidJUnit4::class)
 class DeviceTest {
     private val instrument = InstrumentationRegistry.getInstrumentation()
     private val app = instrument.targetContext.applicationContext as ReCloud
+
+    @Test
+    fun selectingDuplicateInMixedPlaylistKeepsItsVideoQueuePosition() {
+        val repeated = Song("yt-01234567890", "Repeated")
+        val other = Song("yt-09876543210", "Other")
+        val songs = listOf(repeated, Song("local-example", "Local"), other, repeated)
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                val model = ViewModelProvider(activity)[MusicModel::class.java]
+                model.play(songs, at = 3)
+                assertEquals(listOf("Repeated", "Other", "Repeated"), model.videoOrder.map { model.videoQueue.getValue(it).title })
+                assertEquals(2, model.videoPosition)
+                val session = model.showVideo
+                model.updateVideoPosition(session, 1)
+                assertEquals("Other", model.video?.title)
+                model.play(listOf(repeated, other), shuffle = true)
+                val start = model.videoPosition
+                model.updateVideoPosition(session, 1 - start)
+                assertEquals(start, model.videoPosition)
+                assertTrue(model.videoShuffled)
+            }
+        }
+    }
+
+    @Test
+    fun queueEditsAreIndependentOfThePlaylistAndPreserveDuplicateOccurrences() {
+        val song = Song("yt-01234567890", "Repeated")
+        val other = Song("yt-09876543210", "Other")
+        val playlist = listOf(song, other, song)
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity {
+                val model = ViewModelProvider(it)[MusicModel::class.java]
+                model.play(playlist, 2)
+                model.moveVideo(2, 0)
+                assertEquals(2, model.videoPosition)
+                assertEquals(listOf(2, 0, 1), model.videoOrder)
+                model.toggleVideoShuffle()
+                val shuffled = model.videoOrder
+                model.moveVideo(2, 1)
+                assertEquals(shuffled, model.videoOrder)
+                model.removeVideo(0)
+                model.addToQueue(song, false)
+                model.toggleVideoShuffle()
+                assertEquals(listOf(2, 1, 3), model.videoOrder)
+                assertEquals(2, model.videoPosition)
+                model.removeVideo(2)
+                assertEquals(1, model.videoPosition)
+                model.removeVideo(1)
+                model.removeVideo(3)
+                assertNull(model.video)
+                assertTrue(model.videoOrder.isEmpty())
+                assertEquals(listOf(song, other, song), playlist)
+            }
+        }
+    }
+
+    @Test
+    fun videoHistoryAddsNewMetadataAndPreservesSavedTags() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(app, Library::class.java).build()
+        try {
+            val store = Collection(app, db)
+            val video = Song("yt-01234567890", "First listen", artist = "Artist")
+            store.listened(video.id, 0, true, video)
+            assertEquals(video, store.dao.song(video.id))
+            store.dao.put(video.copy(album = "Saved album"))
+            store.listened(video.id, 1_500, false, video)
+            val row = store.dao.stats().first().single()
+            assertEquals(1L, row.starts)
+            assertEquals(1_500L, row.millis)
+            assertEquals("Saved album", store.dao.song(video.id)?.album)
+        } finally {
+            db.close()
+        }
+    }
 
     @Test
     fun playlistChangesAndRepeatedSyncAreTransactional() = runBlocking {
@@ -141,13 +219,38 @@ class DeviceTest {
         } finally {
             Options(app).set("theme", old)
         }
-        val keys = ApiKey(app)
+        val keys = EncryptedPreference.apiKey(app)
         val previous = keys.read()
         try {
             keys.save("instrumentation-test")
-            assertEquals("instrumentation-test", ApiKey(app).read())
+            assertEquals("instrumentation-test", EncryptedPreference.apiKey(app).read())
         } finally {
             keys.save(previous)
+        }
+    }
+
+    @Test
+    fun coldLaunchRemembersAccountAndExplicitSignOutSurvivesRelaunch() {
+        val account = EncryptedPreference.googleAccount(app)
+        val previous = account.read()
+        val key = EncryptedPreference.apiKey(app).read()
+        try {
+            account.save("listener@example.invalid")
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                scenario.onActivity {
+                    val model = ViewModelProvider(it)[MusicModel::class.java]
+                    assertTrue(model.signedIn)
+                    model.signOut()
+                    assertFalse(model.signedIn)
+                }
+            }
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                scenario.onActivity { assertFalse(ViewModelProvider(it)[MusicModel::class.java].signedIn) }
+            }
+            assertEquals("", EncryptedPreference.googleAccount(app).read())
+            assertEquals(key, EncryptedPreference.apiKey(app).read())
+        } finally {
+            account.save(previous)
         }
     }
 
@@ -204,10 +307,21 @@ class DeviceTest {
                     }
                 ) delay(100)
             }
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
+            val backgroundPosition = withContext(Dispatchers.Main) { player.currentPosition }
+            withTimeout(5000) {
+                while (!withContext(Dispatchers.Main) {
+                    player.isPlaying && player.currentPosition >= backgroundPosition + 700
+                }) delay(100)
+            }
             withContext(Dispatchers.Main) {
                 assertEquals(2, player.mediaItemCount)
                 assertTrue(player.shuffleModeEnabled)
                 assertEquals(Player.REPEAT_MODE_ALL, player.repeatMode)
+                val order = player.queueRows().map { it.key }
+                assertEquals(listOf(0, 1), order.sorted())
+                val next = order[(order.indexOf(player.currentMediaItemIndex) + 1) % order.size]
+                assertEquals(next, player.nextMediaItemIndex)
                 player.pause()
                 player.seekTo(1, 4000)
                 player.moveMediaItem(1, 0)

@@ -2,6 +2,7 @@ package org.recloud.music.downloads
 
 import android.content.Context
 import androidx.work.*
+import androidx.room.withTransaction
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
@@ -14,6 +15,8 @@ import kotlinx.coroutines.sync.withLock
 import okhttp3.Request
 import org.recloud.music.ReCloud
 import org.recloud.music.data.Download
+import org.recloud.music.data.HeldDownload
+import org.recloud.music.data.Song
 import org.recloud.music.network.archiveUrl
 
 class Offline(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
@@ -28,6 +31,7 @@ class Offline(context: Context, params: WorkerParameters) : CoroutineWorker(cont
             val part = File(store.audioDir, "$id.part")
             try {
                 transferLock.withLock {
+                    if (isPaused(app)) return@withContext Result.retry()
                     val limit =
                         (app.options.values.first()["storage"]?.toLongOrNull() ?: 512L) *
                             1024 *
@@ -82,15 +86,18 @@ class Offline(context: Context, params: WorkerParameters) : CoroutineWorker(cont
                         }
                         if (count == 0L || total >= 0 && count != total)
                             throw IOException("Incomplete file")
-                        currentCoroutineContext().ensureActive()
-                        Files.move(
-                            part.toPath(),
-                            store.offline(song.id).toPath(),
-                            StandardCopyOption.ATOMIC_MOVE,
-                            StandardCopyOption.REPLACE_EXISTING,
-                        )
-                        withContext(NonCancellable) { store.dao.put(Download(song.id, count)) }
-                        Result.success()
+                        queueLock.withLock {
+                            currentCoroutineContext().ensureActive()
+                            if (isPaused(app)) return@withContext Result.retry()
+                            if (manager(app).getWorkInfoById(id).get()?.state != WorkInfo.State.RUNNING)
+                                return@withContext Result.success()
+                            withContext(NonCancellable) {
+                                Files.move(part.toPath(), store.offline(song.id).toPath(),
+                                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                                store.dao.put(Download(song.id, count))
+                            }
+                            Result.success()
+                        }
                     }
                 }
             } catch (e: IOException) {
@@ -103,13 +110,27 @@ class Offline(context: Context, params: WorkerParameters) : CoroutineWorker(cont
 
     companion object {
         const val TAG = "offline"
+        const val PAUSED = "offlineQueuePaused"
         private val transferLock = Mutex()
+        private val queueLock = Mutex()
+        private fun manager(app: ReCloud) = WorkManager.getInstance(app)
+        private suspend fun isPaused(app: ReCloud) = app.options.values.first()[PAUSED] == "true"
+
+        private suspend fun <T> editQueue(block: suspend () -> T): T =
+            withContext(Dispatchers.IO) { queueLock.withLock { block() } }
+
+        fun songId(job: WorkInfo) = job.tags.firstOrNull { it.startsWith("song=") }?.removePrefix("song=")
+
+        private fun activeSongs(app: ReCloud): Set<String> =
+            manager(app).getWorkInfosByTag(TAG).get().filterNot { it.state.isFinished }
+                .mapNotNull(::songId)
+                .toSet()
 
         private fun failed(reason: String) = Result.failure(workDataOf("error" to reason))
 
         suspend fun reconcile(app: ReCloud) =
             withContext(Dispatchers.IO) {
-                transferLock.withLock {
+                transferLock.withLock { editQueue {
                     val entries = app.collection.dao.downloads().first().associateBy { it.song }
                     val tracks =
                         app.collection.dao.allSongs().associateBy {
@@ -125,10 +146,11 @@ class Offline(context: Context, params: WorkerParameters) : CoroutineWorker(cont
                     entries.keys
                         .filterNot { app.collection.offline(it).exists() }
                         .forEach { app.collection.dao.removeDownload(it) }
-                }
+                    if (isPaused(app)) holdActive(app) else scheduleHeld(app)
+                } }
             }
 
-        fun enqueue(app: ReCloud, id: String) {
+        private fun schedule(app: ReCloud, id: String) {
             val task =
                 OneTimeWorkRequestBuilder<Offline>()
                     .setInputData(workDataOf("song" to id))
@@ -141,16 +163,67 @@ class Offline(context: Context, params: WorkerParameters) : CoroutineWorker(cont
                     .build()
             WorkManager.getInstance(app)
                 .enqueueUniqueWork("offline-$id", ExistingWorkPolicy.KEEP, task)
+                .result.get()
         }
 
-        suspend fun remove(app: ReCloud, id: String) =
-            withContext(Dispatchers.IO) {
-                WorkManager.getInstance(app).cancelUniqueWork("offline-$id").result.get()
-                transferLock.withLock {
-                    val file = app.collection.offline(id)
-                    check(!file.exists() || file.delete()) { "Could not remove the offline file." }
-                    app.collection.dao.removeDownload(id)
-                }
+        // Held rows survive process death between recording the intent and scheduling WorkManager.
+        private suspend fun scheduleHeld(app: ReCloud) {
+            val dao = app.collection.dao
+            val held = dao.heldSongs().first()
+            if (held.isEmpty()) return
+            for (id in held) {
+                if (!app.collection.offline(id).isFile) schedule(app, id)
             }
+            dao.releaseAllHeld()
+        }
+
+        suspend fun enqueue(app: ReCloud, songs: List<Song>): Int = editQueue {
+            val store = app.collection
+            val existing = activeSongs(app) + store.dao.heldSongs().first()
+            val missing = songs.distinctBy { it.id }.filter {
+                it.archived && it.id !in existing && !store.offline(it.id).isFile
+            }
+            store.db.withTransaction {
+                missing.forEach { store.dao.put(it) }
+                store.dao.hold(missing.map { HeldDownload(it.id) })
+            }
+            if (!isPaused(app)) scheduleHeld(app)
+            missing.size
+        }
+
+        private suspend fun holdActive(app: ReCloud) {
+            val unfinished = activeSongs(app).filterNot { app.collection.offline(it).isFile }
+            app.collection.dao.hold(unfinished.map(::HeldDownload))
+            manager(app).cancelAllWorkByTag(TAG).result.get()
+        }
+
+        suspend fun setPaused(app: ReCloud, paused: Boolean) = editQueue {
+            app.options.set(PAUSED, paused.toString())
+            if (paused) holdActive(app) else scheduleHeld(app)
+        }
+
+        suspend fun cancel(app: ReCloud, id: String) = editQueue {
+            manager(app).cancelUniqueWork("offline-$id").result.get()
+            app.collection.dao.releaseHeld(id)
+        }
+
+        private suspend fun deleteCopy(app: ReCloud, id: String) {
+            val file = app.collection.offline(id)
+            check(!file.exists() || file.delete()) { "Could not remove the offline file." }
+            app.collection.dao.removeDownload(id)
+        }
+
+        suspend fun remove(app: ReCloud, id: String) = editQueue {
+            manager(app).cancelUniqueWork("offline-$id").result.get()
+            app.collection.dao.releaseHeld(id)
+            deleteCopy(app, id)
+        }
+
+        suspend fun clear(app: ReCloud, includeCompleted: Boolean) = editQueue {
+            manager(app).cancelAllWorkByTag(TAG).result.get()
+            app.collection.dao.releaseAllHeld()
+            if (includeCompleted)
+                app.collection.dao.downloads().first().forEach { deleteCopy(app, it.song) }
+        }
     }
 }

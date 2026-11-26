@@ -1,0 +1,314 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 2,
+    "identityHash": "5445db1f0b0cbf1134f580a35ddf6003",
+    "entities": [
+      {
+        "tableName": "Song",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `title` TEXT NOT NULL, `artist` TEXT NOT NULL, `album` TEXT NOT NULL, `item` TEXT NOT NULL, `filename` TEXT NOT NULL, `art` TEXT NOT NULL, `license` TEXT NOT NULL, `duration` INTEGER NOT NULL, `bitrate` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "artist",
+            "columnName": "artist",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "album",
+            "columnName": "album",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "item",
+            "columnName": "item",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filename",
+            "columnName": "filename",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "art",
+            "columnName": "art",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "license",
+            "columnName": "license",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "duration",
+            "columnName": "duration",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bitrate",
+            "columnName": "bitrate",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "Mix",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `name` TEXT NOT NULL, `members` TEXT NOT NULL, `edited` INTEGER NOT NULL, `deleted` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "members",
+            "columnName": "members",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "edited",
+            "columnName": "edited",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deleted",
+            "columnName": "deleted",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "Star",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`song` TEXT NOT NULL, `enabled` INTEGER NOT NULL, `edited` INTEGER NOT NULL, PRIMARY KEY(`song`))",
+        "fields": [
+          {
+            "fieldPath": "song",
+            "columnName": "song",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enabled",
+            "columnName": "enabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "edited",
+            "columnName": "edited",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "song"
+          ]
+        }
+      },
+      {
+        "tableName": "Listening",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`song` TEXT NOT NULL, `device` TEXT NOT NULL, `starts` INTEGER NOT NULL, `millis` INTEGER NOT NULL, `recent` INTEGER NOT NULL, PRIMARY KEY(`song`, `device`))",
+        "fields": [
+          {
+            "fieldPath": "song",
+            "columnName": "song",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "device",
+            "columnName": "device",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "starts",
+            "columnName": "starts",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "millis",
+            "columnName": "millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recent",
+            "columnName": "recent",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "song",
+            "device"
+          ]
+        }
+      },
+      {
+        "tableName": "LocalSource",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`song` TEXT NOT NULL, `uri` TEXT NOT NULL, PRIMARY KEY(`song`))",
+        "fields": [
+          {
+            "fieldPath": "song",
+            "columnName": "song",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "uri",
+            "columnName": "uri",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "song"
+          ]
+        }
+      },
+      {
+        "tableName": "Download",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`song` TEXT NOT NULL, `bytes` INTEGER NOT NULL, PRIMARY KEY(`song`))",
+        "fields": [
+          {
+            "fieldPath": "song",
+            "columnName": "song",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bytes",
+            "columnName": "bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "song"
+          ]
+        }
+      },
+      {
+        "tableName": "HeldDownload",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`song` TEXT NOT NULL, PRIMARY KEY(`song`))",
+        "fields": [
+          {
+            "fieldPath": "song",
+            "columnName": "song",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "song"
+          ]
+        }
+      },
+      {
+        "tableName": "PlaylistCover",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`playlist` TEXT NOT NULL, `jpeg` BLOB NOT NULL, PRIMARY KEY(`playlist`))",
+        "fields": [
+          {
+            "fieldPath": "playlist",
+            "columnName": "playlist",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "jpeg",
+            "columnName": "jpeg",
+            "affinity": "BLOB",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "playlist"
+          ]
+        }
+      },
+      {
+        "tableName": "SearchTerm",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`term` TEXT NOT NULL, `used` INTEGER NOT NULL, PRIMARY KEY(`term`))",
+        "fields": [
+          {
+            "fieldPath": "term",
+            "columnName": "term",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "used",
+            "columnName": "used",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "term"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '5445db1f0b0cbf1134f580a35ddf6003')"
+    ]
+  }
+}

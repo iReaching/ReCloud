@@ -10,7 +10,12 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-class ApiKey(context: Context) {
+class EncryptedPreference private constructor(context: Context, private val entry: String) {
+    companion object {
+        fun apiKey(context: Context) = EncryptedPreference(context, "data")
+        fun googleAccount(context: Context) = EncryptedPreference(context, "account")
+    }
+
     private val prefs = context.getSharedPreferences("youtube-config", 0)
     private val alias = "youtube-api-key"
 
@@ -34,7 +39,7 @@ class ApiKey(context: Context) {
     fun read(): String =
         runCatching {
                 val bytes =
-                    Base64.decode(prefs.getString("data", null) ?: return "", Base64.NO_WRAP)
+                    Base64.decode(prefs.getString(entry, null) ?: return "", Base64.NO_WRAP)
                 val cipher = Cipher.getInstance("AES/GCM/NoPadding")
                 cipher.init(
                     Cipher.DECRYPT_MODE,
@@ -47,12 +52,12 @@ class ApiKey(context: Context) {
 
     fun save(value: String) {
         if (value.isBlank()) {
-            prefs.edit().clear().apply()
+            prefs.edit().remove(entry).apply()
             return
         }
         val cipher =
             Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()) }
         val data = cipher.iv + cipher.doFinal(value.trim().toByteArray())
-        prefs.edit().putString("data", Base64.encodeToString(data, Base64.NO_WRAP)).apply()
+        prefs.edit().putString(entry, Base64.encodeToString(data, Base64.NO_WRAP)).apply()
     }
 }

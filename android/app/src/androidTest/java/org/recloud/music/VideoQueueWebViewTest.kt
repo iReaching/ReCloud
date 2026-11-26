@@ -27,7 +27,7 @@ class VideoQueueWebViewTest {
             check(document.getElementById('player').clientHeight > 0, 'visible player');
             check(active === videos[0], 'initial video');
             // Two consecutive entries in shuffled order reference the same video.
-            replaceOrder([0, 51, 1, ...Array.from({length: 49}, (_, i) => i + 2)]);
+            replaceQueue(videos, [0, 51, 1, ...Array.from({length: 49}, (_, i) => i + 2)], 0);
             finish();
             check(active === videos[51] && document.title === 'queue:51', 'advance in shuffled order');
             repeatMode = ${Player.REPEAT_MODE_ONE};
@@ -56,6 +56,67 @@ class VideoQueueWebViewTest {
     }
 
     @Test
+    fun previousAndRepeatReachTracksBeforeTheSelectedDuplicate() {
+        val entries = (1..52).map { number ->
+            val id = if (number == 51) 1 else number
+            VideoEntry(id.toString().padStart(11, '0'), "video", "Track $number")
+        }
+        checkPlayer(entries, """
+            check(active === videos[0] && cursor === 50, 'start at second occurrence');
+            skip(-1);
+            check(active === videos[49] && cursor === 49, 'previous reaches track 50');
+            skip(1);
+            check(document.title === 'queue:50', 'next returns to second occurrence');
+            finish();
+            check(active === videos[51] && cursor === 51, 'advance to track 52');
+            repeatMode = ${Player.REPEAT_MODE_ALL};
+            finish();
+            check(active === videos[0] && cursor === 0, 'wrap to first occurrence');
+        """, start = 50)
+    }
+
+    @Test
+    fun editingOccurrencesKeepsPlaybackAndCanJumpToAnAppendedSong() {
+        val entries = listOf(
+            VideoEntry("01234567890", "video", "First"),
+            VideoEntry("09876543210", "video", "Other"),
+            VideoEntry("01234567890", "video", "Second copy"),
+        )
+        checkPlayer(entries, """
+            const expanded = {...videos, 3: '12345678901'};
+            replaceQueue(expanded, [2, 1, 3, 0], 2);
+            check(cursor === 0 && loads === 0 && replays === 0, 'move current without restarting');
+            jumpTo(0);
+            check(cursor === 3 && document.title === 'queue:0', 'jump to other copy');
+            replaceQueue({1: videos[1], 2: videos[2], 3: videos[3]}, [2, 1, 3], 3);
+            check(active === expanded[3] && cues === 1 && loads === 1, 'remove current while paused');
+            playbackState = 1;
+            replaceQueue({1: videos[1], 2: videos[2]}, [2, 1], 1);
+            check(active === expanded[1] && loads === 2, 'continue after removing playing entry');
+            jumpTo(3);
+            check(loads === 2 && cursor === 1, 'ignore stale row action');
+        """, start = 2)
+    }
+
+    @Test
+    fun historySignalsFollowActualPlayback() {
+        checkPlayer(listOf(VideoEntry("01234567890", "video", "Single")), """
+            const events = [];
+            listeningPort = {postMessage: message => events.push(message)};
+            signal(5); signal(3); signal(2);
+            check(events.length === 0, 'cue, buffer and pause are not plays');
+            active = '09876543210'; signal(1);
+            check(events.length === 0, 'unrelated video does not enter queue history');
+            active = videos[0];
+            signal(1); signal(1); signal(3); signal(1); signal(2);
+            check(events.join() === 'play:0,stop,play:0,stop', 'resume after buffer or seek');
+            repeatMode = ${Player.REPEAT_MODE_ONE};
+            finish(); signal(1);
+            check(events.slice(-3).join() === 'play:0,stop,replay:0', 'confirmed repeat');
+        """)
+    }
+
+    @Test
     fun singleTrackHonorsBothRepeatModes() {
         checkPlayer(listOf(VideoEntry("01234567890", "video", "Single")), """
             repeatMode = ${Player.REPEAT_MODE_ALL};
@@ -69,13 +130,13 @@ class VideoQueueWebViewTest {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun checkPlayer(entries: List<VideoEntry>, assertions: String) {
+    private fun checkPlayer(entries: List<VideoEntry>, assertions: String, start: Int = 0) {
         val instrument = InstrumentationRegistry.getInstrumentation()
         val changed = CountDownLatch(1)
         var result = ""
         val script =
             """
-                let loads = 0, replays = 0, active, signal;
+                let loads = 0, replays = 0, cues = 0, playbackState = 2, active, signal;
                 function check(ok, label) { if (!ok) throw Error(label); }
                 function finish() { signal(1); signal(0); }
                 window.YT = {PlayerState: {PLAYING: 1, ENDED: 0}, Player: function(element, config) {
@@ -86,6 +147,9 @@ class VideoQueueWebViewTest {
                   active = config.videoId;
                   signal = data => config.events.onStateChange({data, target: this});
                   this.loadVideoById = id => { active = id; loads++; };
+                  this.getPlayerState = () => playbackState;
+                  this.getVideoUrl = () => 'https://www.youtube.com/watch?v=' + active;
+                  this.cueVideoById = id => { active = id; cues++; };
                   this.seekTo = seconds => check(seconds === 0, 'seek to start');
                   this.playVideo = () => replays++;
                   config.events.onReady({target: this});
@@ -130,7 +194,7 @@ class VideoQueueWebViewTest {
                 }
             view.loadDataWithBaseURL(
                 "https://org.recloud.music/",
-                videoQueuePage(entries),
+                videoQueuePage(entries.indices.associateWith { entries[it] }, position = start),
                 "text/html",
                 "UTF-8",
                 null,

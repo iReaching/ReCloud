@@ -17,6 +17,15 @@ interface LibraryDao {
 
     @Query("SELECT * FROM Download") fun downloads(): Flow<List<Download>>
 
+    @Query("SELECT song FROM HeldDownload ORDER BY rowid") fun heldSongs(): Flow<List<String>>
+    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun hold(rows: List<HeldDownload>)
+    @Query("DELETE FROM HeldDownload WHERE song=:id") suspend fun releaseHeld(id: String)
+    @Query("DELETE FROM HeldDownload") suspend fun releaseAllHeld()
+
+    @Query("SELECT jpeg FROM PlaylistCover WHERE playlist=:id") fun cover(id: String): Flow<ByteArray?>
+    @Upsert suspend fun put(cover: PlaylistCover)
+    @Query("DELETE FROM PlaylistCover WHERE playlist=:id") suspend fun removeCover(id: String)
+
     @Query("SELECT * FROM SearchTerm ORDER BY used DESC LIMIT 20")
     fun history(): Flow<List<SearchTerm>>
 
@@ -72,9 +81,12 @@ interface LibraryDao {
             Listening::class,
             LocalSource::class,
             Download::class,
+            HeldDownload::class,
+            PlaylistCover::class,
             SearchTerm::class,
         ],
-    version = 1,
+    version = 2,
+    autoMigrations = [AutoMigration(from = 1, to = 2)],
 )
 abstract class Library : RoomDatabase() {
     abstract fun dao(): LibraryDao

@@ -81,6 +81,7 @@ class MusicService : MediaSessionService(), Player.Listener {
             }
         player =
             ExoPlayer.Builder(this)
+                .setWakeMode(C.WAKE_MODE_NETWORK)
                 .setMediaSourceFactory(DefaultMediaSourceFactory(sources))
                 .build()
                 .apply {

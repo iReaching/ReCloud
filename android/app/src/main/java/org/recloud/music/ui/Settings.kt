@@ -13,10 +13,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.work.WorkManager
 import coil.imageLoader
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import org.recloud.music.downloads.Offline
 import org.recloud.music.sync.PeerSync
@@ -46,7 +44,7 @@ private fun Choice(label: String, value: String, choices: List<String>, change: 
 fun Settings(vm: MusicModel, opts: Map<String, String>) {
     var panel by rememberSaveable { mutableStateOf("") }
     var key by remember { mutableStateOf("") }
-    var clear by remember { mutableStateOf(false) }
+    var clear by rememberSaveable { mutableStateOf("") }
     val context = LocalContext.current
     val open = openLink()
     val license =
@@ -83,10 +81,14 @@ fun Settings(vm: MusicModel, opts: Map<String, String>) {
                     vm.notice("Exported $count YouTube entries")
                 }
         }
+    var pendingAccount by rememberSaveable { mutableStateOf("") }
     val consent =
         rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
             result ->
-            vm.account.finish(activity, result.data, vm::access, vm::notice)
+            val name = pendingAccount
+            pendingAccount = ""
+            if (name.isNotEmpty())
+                vm.account.finish(activity, result.data, { vm.access(name, it) }, vm::notice)
         }
     val chooseAccount =
         rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result
@@ -96,8 +98,8 @@ fun Settings(vm: MusicModel, opts: Map<String, String>) {
                 vm.account.authorize(
                     activity,
                     android.accounts.Account(name, "com.google"),
-                    { consent.launch(it) },
-                    vm::access,
+                    { pendingAccount = name; consent.launch(it) },
+                    { vm.access(name, it) },
                     vm::notice,
                 )
             } else vm.notice("Google account selection canceled.")
@@ -105,6 +107,7 @@ fun Settings(vm: MusicModel, opts: Map<String, String>) {
     val download by remember { vm.dao.downloads() }.collectAsStateWithLifecycle(emptyList())
     val songs by remember { vm.dao.songs() }.collectAsStateWithLifecycle(emptyList())
     val work by vm.work.collectAsStateWithLifecycle(emptyList())
+    val held by remember { vm.dao.heldSongs() }.collectAsStateWithLifecycle(emptyList())
     val sync = remember { PeerSync(context.applicationContext, vm.store) }
     DisposableEffect(sync) { onDispose { sync.close() } }
     var pending by remember { mutableStateOf("") }
@@ -150,6 +153,10 @@ fun Settings(vm: MusicModel, opts: Map<String, String>) {
                 Text(paragraph, style = MaterialTheme.typography.bodySmall)
             }
         } else if (panel == "Downloads") {
+            val paused = opts[Offline.PAUSED] == "true"
+            val pending = work.filterNot { it.state.isFinished }
+            val pendingIds = pending.mapNotNull(Offline::songId).toSet()
+            val hasPending = held.isNotEmpty() || pending.isNotEmpty()
             item {
                 Text("${download.sumOf{it.bytes}/1048576} MB stored")
                 Choice(
@@ -159,13 +166,26 @@ fun Settings(vm: MusicModel, opts: Map<String, String>) {
                 ) {
                     vm.task { vm.app.options.set("storage", it) }
                 }
+                if (hasPending || paused) {
+                    TextButton({ vm.task { Offline.setPaused(vm.app, !paused) } }) {
+                        Text(if (paused) "Resume downloads" else "Pause downloads")
+                    }
+                    if (paused) Text("Downloads paused. Interrupted recordings restart from the beginning.")
+                }
+                if (hasPending) TextButton({ clear = "pending" }) { Text("Clear pending downloads") }
+            }
+            items(held.filterNot { it in pendingIds }) { id ->
+                Text(songs.find { it.id == id }?.title ?: "Recording")
+                Text(if (paused) "Paused" else "Queued")
+                TextButton({ vm.task { Offline.cancel(vm.app, id) } }) { Text("Cancel transfer") }
             }
             val active =
                 work.filter {
-                    !it.state.isFinished || it.state == androidx.work.WorkInfo.State.FAILED
+                    !it.state.isFinished || (it.state == androidx.work.WorkInfo.State.FAILED &&
+                        Offline.songId(it) !in held && Offline.songId(it) !in pendingIds)
                 }
             items(active) { job ->
-                val id = job.tags.firstOrNull { it.startsWith("song=") }?.substringAfter("=")
+                val id = Offline.songId(job)
                 val total = job.progress.getLong("total", -1)
                 val bytes = job.progress.getLong("bytes", 0)
                 Text(songs.find { it.id == id }?.title ?: "Recording")
@@ -175,13 +195,13 @@ fun Settings(vm: MusicModel, opts: Map<String, String>) {
                             if (total > 0) " / ${total/1024} KB" else ""
                 )
                 if (!job.state.isFinished)
-                    TextButton({ WorkManager.getInstance(context).cancelWorkById(job.id) }) {
+                    TextButton({ if (id != null) vm.task { Offline.cancel(vm.app, id) } }) {
                         Text("Cancel transfer")
                     }
                 else
                     songs
                         .find { it.id == id }
-                        ?.let { s -> TextButton({ vm.download(s) }) { Text("Retry") } }
+                        ?.let { s -> TextButton({ vm.download(listOf(s)) }) { Text("Retry") } }
             }
             items(download) { entry ->
                 val s = songs.find { it.id == entry.song }
@@ -192,10 +212,10 @@ fun Settings(vm: MusicModel, opts: Map<String, String>) {
                     Text("Remove download")
                 }
             }
-            if (download.isEmpty() && active.isEmpty())
+            if (download.isEmpty() && active.isEmpty() && held.isEmpty())
                 item { Text("Downloads from licensed recordings appear here.") }
-            if (download.isNotEmpty() || active.any { !it.state.isFinished })
-                item { TextButton({ clear = true }) { Text("Clear offline content") } }
+            if (download.isNotEmpty())
+                item { TextButton({ clear = "all" }) { Text("Clear offline content") } }
         } else if (panel == "Library sync") {
             item {
                 Text(
@@ -278,9 +298,9 @@ fun Settings(vm: MusicModel, opts: Map<String, String>) {
                 }
                 if (vm.signedIn) Entry("Refresh my playlists") { vm.refreshAccountPlaylists() }
                 if (vm.signedIn)
-                    Entry("Sign out", "YouTube playlist access is active") { vm.signOut() }
-                else
-                    Entry("Connect Google account", "Read your YouTube playlists") {
+                    Entry("Sign out") { vm.signOut() }
+                if (!vm.signedIn || vm.reconnectNeeded || vm.playlistsError.isNotEmpty())
+                    Entry(if (vm.signedIn) "Reconnect Google account" else "Connect Google account", "Read your YouTube playlists") {
                         val services =
                             com.google.android.gms.common.GoogleApiAvailability.getInstance()
                         val status = services.isGooglePlayServicesAvailable(activity)
@@ -347,27 +367,21 @@ fun Settings(vm: MusicModel, opts: Map<String, String>) {
                 }
             },
         )
-    if (clear)
+    if (clear.isNotEmpty())
         AlertDialog(
-            onDismissRequest = { clear = false },
-            title = { Text("Clear offline content?") },
-            text = { Text("Cancel transfers and remove downloaded recordings from this phone.") },
+            onDismissRequest = { clear = "" },
+            title = { Text(if (clear == "all") "Clear offline content?" else "Clear pending downloads?") },
+            text = { Text(if (clear == "all") "Cancel transfers and remove downloaded recordings from this phone."
+                else "Cancel queued and active transfers. Completed recordings stay on this phone.") },
             confirmButton = {
                 TextButton({
-                    clear = false
-                    vm.task {
-                        withContext(Dispatchers.IO) {
-                            WorkManager.getInstance(context)
-                                .cancelAllWorkByTag(Offline.TAG)
-                                .result
-                                .get()
-                        }
-                        vm.dao.downloads().first().forEach { Offline.remove(vm.app, it.song) }
-                    }
+                    val all = clear == "all"
+                    clear = ""
+                    vm.task { Offline.clear(vm.app, includeCompleted = all) }
                 }) {
                     Text("Clear")
                 }
             },
-            dismissButton = { TextButton({ clear = false }) { Text("Cancel") } },
+            dismissButton = { TextButton({ clear = "" }) { Text("Cancel") } },
         )
 }

@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
+import android.os.SystemClock
 import androidx.compose.runtime.*
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
@@ -22,6 +23,7 @@ import org.recloud.music.data.*
 import org.recloud.music.downloads.Offline
 import org.recloud.music.network.*
 import org.recloud.music.playback.MusicService
+import org.recloud.music.playback.VideoListening
 import org.recloud.music.playback.media
 
 class MusicModel(application: Application) : AndroidViewModel(application), Player.Listener {
@@ -29,18 +31,37 @@ class MusicModel(application: Application) : AndroidViewModel(application), Play
     val store = app.collection
     val dao = store.dao
     val account = YouTubeAccount(app.client)
-    val apiKey = ApiKey(app)
+    val apiKey = EncryptedPreference.apiKey(app)
     val youtube = YouTubeCatalog(app, app.client)
-    private var token = ""
-    var signedIn by mutableStateOf(false)
+    private val rememberedAccount = EncryptedPreference.googleAccount(app)
+    private fun session(name: String, token: String? = null) = PlaylistSession(
+        name, token, { account.restore(app, it) }, { account.invalidate(app, it) },
+    )
+    private var activeAccount by mutableStateOf(rememberedAccount.read().takeIf { it.isNotBlank() }?.let { session(it) })
+    val signedIn get() = activeAccount != null
+    var reconnectNeeded by mutableStateOf(false)
         private set
 
     private fun searchKey() =
         apiKey.read().ifBlank { org.recloud.music.BuildConfig.YOUTUBE_API_KEY }
 
-    internal fun playlistReader(id: String) = account.reader(id, token)
+    private suspend fun <T> authorized(current: PlaylistSession, fetch: suspend (String) -> T): T {
+        try {
+            return current.request(fetch)
+        } catch (error: ConsentRequired) {
+            if (activeAccount === current) reconnectNeeded = true
+            throw error
+        }
+    }
 
-    var accountSession by mutableStateOf("")
+    internal fun playlistReader(id: String): AccountPlaylistReader {
+        val current = checkNotNull(activeAccount)
+        return AccountPlaylistReader { cursor ->
+            authorized(current) { account.playlistPage(id, cursor, it) }
+        }
+    }
+
+    var accountSession by mutableStateOf(if (signedIn) java.util.UUID.randomUUID().toString() else "")
         private set
     var playlistsLoading by mutableStateOf(false)
         private set
@@ -89,7 +110,6 @@ class MusicModel(application: Application) : AndroidViewModel(application), Play
     var loadingAlbum by mutableStateOf(false)
         private set
 
-    var video by mutableStateOf<VideoEntry?>(null)
     var controller by mutableStateOf<MediaController?>(null)
         private set
 
@@ -97,6 +117,11 @@ class MusicModel(application: Application) : AndroidViewModel(application), Play
         private set
 
     val work = WorkManager.getInstance(app).getWorkInfosByTagFlow(Offline.TAG)
+    val pendingIds = combine(work, dao.heldSongs()) { jobs, held ->
+        held.toSet() + jobs.filterNot { it.state.isFinished }.mapNotNull(Offline::songId)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
+    val downloadedIds = dao.downloads().map { rows -> rows.map { it.song }.toSet() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
     private val searchCache =
         object : LinkedHashMap<Pair<String, Kind>, List<Release>>(16, 0.75f, true) {
             override fun removeEldestEntry(
@@ -127,6 +152,7 @@ class MusicModel(application: Application) : AndroidViewModel(application), Play
             ContextCompat.getMainExecutor(app),
         )
         task { Offline.reconcile(app) }
+        refreshAccountPlaylists()
         refreshHome()
     }
 
@@ -182,7 +208,9 @@ class MusicModel(application: Application) : AndroidViewModel(application), Play
                     val direct = videoId(query)
                     videos =
                         if (direct != null && parent == null) listOf(youtube.linkedVideo(direct))
-                        else youtube.list(query, filter, parent, searchKey(), token)
+                        else activeAccount?.let { current ->
+                            authorized(current) { youtube.list(query, filter, parent, "", it) }
+                        } ?: youtube.list(query, filter, parent, searchKey(), "")
                 } else {
                     val kind = Kind.valueOf(filter)
                     val key = query to kind
@@ -257,95 +285,188 @@ class MusicModel(application: Application) : AndroidViewModel(application), Play
         }
     }
 
-    fun access(value: String) {
-        accountJob?.cancel()
-        if (token != value) {
+    fun access(name: String, value: String) {
+        rememberedAccount.save(name)
+        if (activeAccount?.name != name) {
+            searching?.cancel()
+            busy = false
+            videos = emptyList()
             clearAccountQueue()
             accountSession = java.util.UUID.randomUUID().toString()
             playlists = emptyList()
         }
-        token = value
-        signedIn = true
+        activeAccount = session(name, value)
+        reconnectNeeded = false
+        notice("Google account connected.")
+        refreshAccountPlaylists()
+    }
+
+    fun refreshAccountPlaylists() {
+        val current = activeAccount ?: return
+        accountJob?.cancel()
         playlistsLoading = true
         playlistsError = ""
         accountJob = task {
             try {
-                playlists = account.playlists(value)
-                notice("Google account connected.")
+                playlists = authorized(current, account::playlists)
+                reconnectNeeded = false
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                if (e is ServiceFailure && e.status == 401 && "youtubeSignupRequired" !in e.reasons) signOut()
                 playlistsError = playlistFailureMessage(e)
-                notice(playlistsError)
+                if (e is ServiceFailure && e.status == 401 && "youtubeSignupRequired" !in e.reasons)
+                    reconnectNeeded = true
             } finally {
                 if (currentCoroutineContext().isActive) playlistsLoading = false
             }
         }
     }
 
-    fun refreshAccountPlaylists() { if (token.isNotEmpty()) access(token) }
-
     fun signOut() {
+        rememberedAccount.save("")
         clearAccountQueue()
-        if (token.isNotBlank())
-            com.google.android.gms.auth.api.identity.Identity.getAuthorizationClient(app)
-                .clearToken(
-                    com.google.android.gms.auth.api.identity.ClearTokenRequest.builder()
-                        .setToken(token)
-                        .build()
-                )
+        activeAccount?.token?.let { previous -> task { account.invalidate(app, previous) } }
         accountJob?.cancel()
         searching?.cancel()
-        token = ""
+        activeAccount = null
         accountSession = ""
         playlistsLoading = false
         playlistsError = ""
-        signedIn = false
+        reconnectNeeded = false
         playlists = emptyList()
         videos = emptyList()
         busy = false
     }
 
-    var videoQueue by mutableStateOf(emptyList<VideoEntry>())
+    // Keys identify playlist occurrences and stay stable across edits, including duplicate videos.
+    var videoQueue by mutableStateOf(emptyMap<Int, VideoEntry>())
         private set
+    var videoOrder by mutableStateOf(emptyList<Int>())
+        private set
+    private var originalOrder by mutableStateOf<List<Int>?>(null)
+    val videoShuffled get() = originalOrder != null
+    private var nextVideoKey = 0
 
     var showVideo by mutableIntStateOf(0)
         private set
 
-    fun openVideo(entry: VideoEntry) = openVideoQueue(listOf(entry))
+    var videoPosition by mutableIntStateOf(0)
+        private set
+    val video: VideoEntry? get() = videoQueue[videoPosition]
 
     private var accountQueue = false
+    private val videoListening = VideoListening(SystemClock::elapsedRealtime) { entry, ms, start ->
+        val song = Song("yt-" + entry.id, entry.title, entry.artist)
+        task { store.listened(song.id, ms, start, song) }
+    }
+
+    fun videoPlaying(session: Int, key: Int, replay: Boolean) {
+        if (session == showVideo) videoQueue[key]?.let { videoListening.play(key, it, replay) }
+    }
+
+    fun videoStopped(session: Int) {
+        if (session == showVideo) videoListening.stop()
+    }
+
+    fun checkpointVideo(session: Int) {
+        if (session == showVideo) videoListening.checkpoint()
+    }
 
     private fun clearAccountQueue() {
-        if (accountQueue) {
-            video = null
-            videoQueue = emptyList()
-            accountQueue = false
+        if (accountQueue) closeVideo()
+    }
+
+    fun closeVideo() {
+        videoListening.reset()
+        videoQueue = emptyMap()
+        videoOrder = emptyList()
+        originalOrder = null
+        accountQueue = false
+    }
+
+    fun updateVideoPosition(session: Int, index: Int) {
+        if (session == showVideo && index in videoQueue) videoPosition = index
+    }
+
+    fun openVideoQueue(
+        entries: List<VideoEntry>,
+        start: Int,
+        shuffle: Boolean = false,
+        fromAccount: Boolean = false,
+    ) {
+        if (start !in entries.indices) return
+        videoListening.reset()
+        accountQueue = fromAccount
+        videoQueue = entries.indices.associateWith { entries[it] }
+        nextVideoKey = entries.size
+        val ordered = entries.indices.toList()
+        originalOrder = if (shuffle) ordered else null
+        videoOrder = if (shuffle) listOf(start) + ordered.filter { it != start }.shuffled() else ordered
+        videoPosition = start
+        showVideo++
+        controller?.pause()
+    }
+
+    fun toggleVideoShuffle() {
+        val original = originalOrder
+        if (original == null) {
+            originalOrder = videoOrder
+            videoOrder = videoOrder.shuffled()
+        } else {
+            originalOrder = null
+            videoOrder = original
         }
     }
 
-    fun openVideoQueue(entries: List<VideoEntry>, fromAccount: Boolean = false) {
-        val first = entries.firstOrNull() ?: return
-        accountQueue = fromAccount
-        videoQueue = entries
-        showVideo++
-        controller?.pause()
-        video = first
+    fun moveVideo(key: Int, target: Int) {
+        if (videoShuffled || key == target) return
+        val to = videoOrder.indexOf(target)
+        if (to < 0 || key !in videoQueue) return
+        videoOrder = videoOrder.toMutableList().apply {
+            remove(key)
+            add(to, key)
+        }
+    }
+
+    fun removeVideo(key: Int) {
+        val at = videoOrder.indexOf(key)
+        if (at < 0) return
+        if (videoOrder.size == 1) return closeVideo()
+        val remaining = videoOrder - key
+        if (videoPosition == key) {
+            videoListening.stop()
+            videoPosition = remaining[at.coerceAtMost(remaining.lastIndex)]
+        }
+        videoQueue = videoQueue - key
+        videoOrder = remaining
+        originalOrder = originalOrder?.minus(key)
+    }
+
+    fun addToQueue(song: Song, fromAccount: Boolean) {
+        val id = song.youtubeId ?: return play(listOf(song), append = true)
+        val entry = VideoEntry(id, "video", song.title, song.artist)
+        if (videoQueue.isEmpty()) {
+            openVideoQueue(listOf(entry), 0, fromAccount = fromAccount)
+        } else {
+            val key = nextVideoKey++
+            videoQueue = videoQueue + (key to entry)
+            videoOrder = videoOrder + key
+            originalOrder = originalOrder?.plus(key)
+            accountQueue = accountQueue || fromAccount
+        }
+        notice("Added to YouTube queue")
     }
 
     fun play(list: List<Song>, at: Int = 0, shuffle: Boolean = false, append: Boolean = false) {
         if (list.isEmpty()) return
         val index = if (shuffle) list.indices.random() else at.coerceIn(list.indices)
         val selected = list[index]
-        val youtubeId = selected.youtubeId
-        if (youtubeId != null) {
-            val ordered = if (shuffle) {
-                listOf(selected) + list.filterIndexed { i, _ -> i != index }.shuffled()
-            } else list.drop(index)
-            openVideoQueue(ordered.mapNotNull { song ->
+        val preceding = list.subList(0, index)
+        if (selected.youtubeId != null) {
+            val entries = list.mapNotNull { song ->
                 song.youtubeId?.let { VideoEntry(it, "video", song.title, song.artist) }
-            })
-            if (list.any { it.youtubeId == null })
+            }
+            openVideoQueue(entries, preceding.count { it.youtubeId != null }, shuffle)
+            if (entries.size != list.size)
                 notice("Playing the YouTube entries in this list.")
             return
         }
@@ -354,13 +475,13 @@ class MusicModel(application: Application) : AndroidViewModel(application), Play
         val player = controller ?: return notice("Player is connecting. Try again.")
         task {
             store.db.withTransaction { list.forEach { dao.put(it) } }
-            video = null
             val items = audio.map { it.media() }
             if (append) {
                 player.addMediaItems(items)
                 notice("Added to queue")
             } else {
-                player.setMediaItems(items, audio.indexOf(selected), 0)
+                closeVideo()
+                player.setMediaItems(items, preceding.count { it.youtubeId == null }, 0)
                 player.shuffleModeEnabled = shuffle
                 player.prepare()
                 player.play()
@@ -405,9 +526,13 @@ class MusicModel(application: Application) : AndroidViewModel(application), Play
         notice("Imported $success of ${uris.size} audio files")
     }
 
-    fun download(song: Song) = task {
-        dao.put(song)
-        Offline.enqueue(app, song.id)
+    fun download(songs: List<Song>) = task {
+        val count = Offline.enqueue(app, songs)
+        notice(when (count) {
+            0 -> "No new recordings to download."
+            1 -> "Queued 1 recording"
+            else -> "Queued $count recordings"
+        })
     }
 
     override fun onEvents(player: Player, events: Player.Events) {

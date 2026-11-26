@@ -243,6 +243,7 @@ fun Album(vm: MusicModel) {
                 TextButton({ vm.browse(album) }) { Text("Retry") }
             }
         item { PlayActions(vm.albumSongs, vm) }
+        item { DownloadActions(vm.albumSongs, vm) }
         itemsIndexed(vm.albumSongs) { i, s -> SongRow(s, vm, { vm.play(vm.albumSongs, i) }) }
     }
 }
@@ -253,6 +254,8 @@ fun Search(vm: MusicModel, player: () -> Unit) {
     var source by rememberSaveable { mutableStateOf("YouTube") }
     var filter by rememberSaveable { mutableStateOf("video") }
     var group by rememberSaveable { mutableStateOf("") }
+    val results = vm.videos
+    val matches = vm.matches
     val history by remember { vm.dao.history() }.collectAsStateWithLifecycle(emptyList())
     val open = openLink()
     fun submit(q: String = query) {
@@ -336,13 +339,15 @@ fun Search(vm: MusicModel, player: () -> Unit) {
                 TextButton({ submit() }) { Text("‹ Search results") }
                 Heading(group)
             }
-        items(vm.videos) { v ->
+        itemsIndexed(results) { index, v ->
             if (v.type == "video")
                 SongRow(
                     Song("yt-" + v.id, v.title, v.artist),
                     vm,
                     {
-                        vm.openVideo(v)
+                        val playable = results.filter { it.type == "video" }
+                        val start = results.subList(0, index).count { it.type == "video" }
+                        vm.openVideoQueue(playable, start)
                         player()
                     },
                 )
@@ -352,7 +357,7 @@ fun Search(vm: MusicModel, player: () -> Unit) {
                     vm.search(query, source, filter, v)
                 }
         }
-        items(vm.matches) { s -> SongRow(s, vm, { vm.play(listOf(s)) }) }
+        itemsIndexed(matches) { index, song -> SongRow(song, vm, { vm.play(matches, index) }) }
         if (source == "Archive" && filter == "Artists") {
             val groups = vm.releases.groupBy { it.artist.ifBlank { "Unknown artist" } }
             if (group.isBlank())

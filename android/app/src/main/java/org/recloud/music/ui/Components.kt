@@ -22,6 +22,7 @@ import androidx.room.withTransaction
 import coil.compose.AsyncImage
 import org.recloud.music.R
 import org.recloud.music.data.*
+import org.recloud.music.downloads.Offline
 import org.recloud.music.network.Release
 import org.recloud.music.network.archiveUrl
 import org.recloud.music.viewmodel.MusicModel
@@ -53,13 +54,13 @@ fun Heading(title: String) {
 }
 
 @Composable
-fun Cover(url: String?, modifier: Modifier) {
+fun Cover(url: Any?, modifier: Modifier) {
     val shape = RoundedCornerShape(10.dp)
     Box(
         modifier.clip(shape).background(MaterialTheme.colorScheme.surfaceVariant),
         contentAlignment = Alignment.Center,
     ) {
-        if (url.isNullOrBlank())
+        if (url == null || url is String && url.isBlank())
             Text("♫", fontSize = 32.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         else
             AsyncImage(
@@ -142,7 +143,7 @@ fun Shelf(title: String, list: List<Release>, size: Int = 132, click: (Release) 
 }
 
 @Composable
-fun SongRow(song: Song, vm: MusicModel, play: () -> Unit, remove: (() -> Unit)? = null) {
+fun SongRow(song: Song, vm: MusicModel, play: () -> Unit, remove: (() -> Unit)? = null, fromAccount: Boolean = false) {
     var menu by remember(song.id) { mutableStateOf(false) }
     var picker by remember(song.id) { mutableStateOf(false) }
     val open = openLink()
@@ -181,11 +182,10 @@ fun SongRow(song: Song, vm: MusicModel, play: () -> Unit, remove: (() -> Unit)? 
                     menu = false
                     block()
                 }
-                if (song.youtubeId == null)
-                    DropdownMenuItem(
-                        { Text("Add to queue") },
-                        { action { vm.play(listOf(song), append = true) } },
-                    )
+                DropdownMenuItem(
+                    { Text("Add to queue") },
+                    { action { vm.addToQueue(song, fromAccount) } },
+                )
                 val stars by vm.dao.stars().collectAsStateWithLifecycle(emptyList())
                 DropdownMenuItem(
                     {
@@ -197,7 +197,17 @@ fun SongRow(song: Song, vm: MusicModel, play: () -> Unit, remove: (() -> Unit)? 
                 )
                 DropdownMenuItem({ Text("Add to playlist") }, { action { picker = true } })
                 if (song.archived) {
-                    DropdownMenuItem({ Text("Download") }, { action { vm.download(song) } })
+                    val downloaded by vm.downloadedIds.collectAsStateWithLifecycle()
+                    val pending by vm.pendingIds.collectAsStateWithLifecycle()
+                    if (song.id in downloaded)
+                        DropdownMenuItem({ Text("Remove download") }, {
+                            action { vm.task { Offline.remove(vm.app, song.id) } }
+                        })
+                    else if (song.id in pending)
+                        DropdownMenuItem({ Text("Cancel download") }, {
+                            action { vm.task { Offline.cancel(vm.app, song.id) } }
+                        })
+                    else DropdownMenuItem({ Text("Download") }, { action { vm.download(listOf(song)) } })
                     DropdownMenuItem(
                         { Text("Recording and credits") },
                         { action { open(archiveUrl("details", song.item)) } },
@@ -263,6 +273,34 @@ fun SongRow(song: Song, vm: MusicModel, play: () -> Unit, remove: (() -> Unit)? 
             dismissButton = { TextButton({ picker = false }) { Text("Close") } },
         )
     }
+}
+
+@Composable
+internal fun DownloadActions(songs: List<Song>, vm: MusicModel) {
+    val eligible = remember(songs) { songs.filter { it.archived }.distinctBy { it.id } }
+    if (eligible.isEmpty()) return
+    val downloaded by vm.downloadedIds.collectAsStateWithLifecycle()
+    val pending by vm.pendingIds.collectAsStateWithLifecycle()
+    val missing = eligible.filter { it.id !in downloaded }
+    val available = missing.count { it.id !in pending }
+    var confirm by remember(eligible) { mutableStateOf(false) }
+    if (available > 0) {
+        OutlinedButton({ vm.download(eligible) }) { Text("Download eligible tracks ($available)") }
+    } else if (missing.isNotEmpty()) {
+        Text("Queued for download · ${missing.size}")
+    } else {
+        TextButton({ confirm = true }) { Text("Remove downloaded tracks") }
+    }
+    if (confirm) AlertDialog(
+        onDismissRequest = { confirm = false },
+        title = { Text("Remove downloaded tracks?") },
+        text = { Text("Remove the offline copies of ${eligible.size} recordings from this phone. Playlist entries are kept.") },
+        confirmButton = { TextButton({
+            confirm = false
+            vm.task { eligible.forEach { Offline.remove(vm.app, it.id) } }
+        }) { Text("Remove") } },
+        dismissButton = { TextButton({ confirm = false }) { Text("Cancel") } },
+    )
 }
 
 @Composable

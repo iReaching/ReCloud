@@ -98,8 +98,11 @@ private fun AccountPlaylist(
     val session = vm.accountSession
     fun play(start: Int, shuffle: Boolean) =
         request(false) {
-            val queue = reader.queue(start, shuffle)
-            if (session == vm.accountSession) vm.openVideoQueue(queue, fromAccount = true)
+            val queue = reader.loadAll()
+            if (session == vm.accountSession && queue.isNotEmpty()) {
+                val selected = if (shuffle) queue.indices.random() else start
+                vm.openVideoQueue(queue, selected, shuffle, fromAccount = true)
+            }
         }
     LaunchedEffect(reader) { request(false, reader::loadNext) }
     LazyColumn(contentPadding = PaddingValues(16.dp)) {
@@ -116,7 +119,7 @@ private fun AccountPlaylist(
             if (!more && entries.isEmpty()) Text("This playlist has no available videos.")
         }
         itemsIndexed(entries) { index, entry ->
-            SongRow(Song("yt-" + entry.id, entry.title, entry.artist), vm, { play(index, false) })
+            SongRow(Song("yt-" + entry.id, entry.title, entry.artist), vm, { play(index, false) }, fromAccount = true)
         }
         item {
             if (loadingMore) PlaylistRequestStatus(busy, error) { retry?.let { request(true, it) } }

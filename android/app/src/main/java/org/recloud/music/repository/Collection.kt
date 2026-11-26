@@ -1,6 +1,11 @@
 package org.recloud.music.repository
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.drawable.BitmapDrawable
+import coil.imageLoader
+import coil.request.ImageRequest
+import java.io.ByteArrayOutputStream
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -114,6 +119,21 @@ class Collection(private val app: Context, val db: Library) : PlaybackProvider {
             }
         }
 
+    suspend fun setPlaylistCover(id: String, uri: Uri) = withContext(Dispatchers.IO) {
+        val image = app.imageLoader.execute(
+            ImageRequest.Builder(app).data(uri).size(512, 512)
+                .scale(coil.size.Scale.FIT).precision(coil.size.Precision.EXACT)
+                .allowHardware(false).build()
+        ).drawable as? BitmapDrawable ?: error("Could not open that image.")
+        val jpeg = ByteArrayOutputStream().use {
+            check(image.bitmap.compress(Bitmap.CompressFormat.JPEG, 90, it)) { "Could not save cover." }
+            it.toByteArray()
+        }
+        db.withTransaction {
+            if (dao.mix(id)?.deleted == false) dao.put(PlaylistCover(id, jpeg))
+        }
+    }
+
     suspend fun changeMix(id: String?, name: String? = null, edit: (Mix) -> Mix = { it }) =
         db.withTransaction {
             val mix =
@@ -121,6 +141,7 @@ class Collection(private val app: Context, val db: Library) : PlaybackProvider {
                     Mix(UUID.randomUUID().toString(), requireNotNull(name).trim(), edited = 0)
                 else dao.mix(id)?.takeUnless { it.deleted } ?: return@withTransaction
             val next = edit(mix)
+            if (next.deleted) dao.removeCover(mix.id)
             require(next.name.isNotBlank())
             dao.put(
                 next.copy(
@@ -152,8 +173,9 @@ class Collection(private val app: Context, val db: Library) : PlaybackProvider {
             )
         }
 
-    suspend fun listened(id: String, ms: Long, start: Boolean) =
+    suspend fun listened(id: String, ms: Long, start: Boolean, metadata: Song? = null) =
         db.withTransaction {
+            if (metadata != null && dao.song(id) == null) dao.put(metadata)
             val old = dao.stat(id, device) ?: Listening(id, device)
             dao.put(
                 old.copy(
@@ -204,8 +226,10 @@ class Collection(private val app: Context, val db: Library) : PlaybackProvider {
                             codec.encodeToString(next),
                             codec.encodeToString(old),
                         )
-                )
+                ) {
                     dao.put(next)
+                    if (next.deleted) dao.removeCover(next.id)
+                }
             }
             packet.stars.forEach {
                 require(it.song in ids)
